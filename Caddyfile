@@ -1,0 +1,21 @@
+{
+	nacos {
+		ip_addr ip_sample
+		port port_sample
+		namespace namespace_sample
+		username username_sample
+		password password_sample
+	}
+}
+
+:8891 {
+	reverse_proxy {
+		dynamic nacosupstream {
+			service_name service_name_sample
+			group_name DEFAULT_GROUP
+			namespace namespace_sample
+			duration 30s
+		}
+		lb_policy least_conn
+	}
+}

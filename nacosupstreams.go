@@ -5,15 +5,13 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"go.uber.org/zap"
 )
-
-const defaultRefreshDureation = 30
 
 func init() {
 	caddy.RegisterModule(NacosUpstreams{})
@@ -28,6 +26,7 @@ type NacosUpstreams struct {
 	ServiceName string   `json:"service_name,omitempty"`
 	GroupName   string   `json:"group_name,omitempty"`
 	Cluster     []string `json:"cluster,omitempty"`
+	Namespace   string   `json:"namespace,omitempty"`
 
 	//nacos cient to search instances for dynamic upstream
 	nacosClient *NacosClientApp
@@ -56,10 +55,11 @@ func (nu *NacosUpstreams) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-func (nu NacosUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
-
-	instances, err := nu.nacosClient.SelectInstances(nu.ServiceName, nu.GroupName, []string{"DEFAULT"})
+func (nu *NacosUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
+	nu.logger.Info("GetUpstreams", zap.String("service_name", nu.ServiceName), zap.String("group_name", nu.GroupName), zap.String("namespace", nu.Namespace))
+	instances, err := nu.nacosClient.SelectInstances(nu.ServiceName, nu.GroupName, []string{"DEFAULT"}, nu.Namespace)
 	if err != nil {
+		nu.logger.Error("GetUpstreams", zap.Error(err))
 		// From SelectInstances docs: "If the response contains invalid names, those records are filtered
 		// out and an error will be returned alongside the remaining results, if any." Thus, we
 		// only return an error if no records were also returned.
@@ -82,23 +82,43 @@ func (nu NacosUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream
 	return upstreams, nil
 }
 
-type nacosLookups struct {
-	nacosUpstreams NacosUpstreams
-	freshness      time.Time
-	upstreams      []*reverseproxy.Upstream
+func (nu *NacosUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		for d.NextBlock(0) {
+			switch d.Val() {
+			case "duration":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("parsing refresh interval duration: %v", err)
+				}
+				nu.Refresh = caddy.Duration(dur)
+			case "service_name":
+				if !d.AllArgs(&nu.ServiceName) {
+					return d.ArgErr()
+				}
+			case "group_name":
+				if !d.AllArgs(&nu.GroupName) {
+					return d.ArgErr()
+				}
+			case "namespace":
+				if !d.AllArgs(&nu.Namespace) {
+					return d.ArgErr()
+				}
+			default:
+				return d.Errf("unrecognized NacosUpstreams directive: %s", d.Val())
+			}
+		}
+	}
+
+	return nil
 }
 
-func (nl nacosLookups) isFresh() bool {
-	return time.Since(nl.freshness) < time.Duration(nl.nacosUpstreams.Refresh)
-}
-
-var (
-	nacosSrvs = make(map[string]nacosLookups)
-	nacosMu   sync.RWMutex
-)
-
-//Interface guards
+// Interface guards
 var (
 	_ caddy.Provisioner           = (*NacosUpstreams)(nil)
 	_ reverseproxy.UpstreamSource = (*NacosUpstreams)(nil)
+	_ caddyfile.Unmarshaler       = (*NacosUpstreams)(nil)
 )
